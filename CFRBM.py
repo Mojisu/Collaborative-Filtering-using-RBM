@@ -11,18 +11,28 @@ would identify the users who share the same preferneces with the active users,
 and propose items which the like-minded users favoured.
 """
 
+import time
+import PIL.Image
+
 import numpy
 
+import theano
 import theano.tensor as T
+import os
+
+import pandas
+
 from theano.tensor.shared_randomstreams import RandomStreams
 
-class CFRBM(object):
-   """ Collaborative Filtering using Restricted Boltzmann Machine (RBM) """
-  
-    def __init__( self, n_visible, n_hidden, n_rating, W, hbias, vbias, \
-        numpy_rng = None, theano_rng = None):
+from utils import tile_raster_images
 
-       '''CFRBM constructor'''
+class CFRBM(object):
+    """ Collaborative Filtering using Restricted Boltzmann Machine (RBM) """
+ 
+    def __init__( self, n_visible, n_hidden, n_rating, W=None, hbias=None, vbias=None, \
+      numpy_rng=None, theano_rng=None):
+
+        '''CFRBM constructor'''
 
         self.n_visible = n_visible
         self.n_hidden = n_visible
@@ -39,7 +49,7 @@ class CFRBM(object):
           #  Creates a theano random number generator
           theano_rng = RandomStreams(numpy_rng.randint(2 ** 40))
 
-        if W is none:
+        if W is None:
           # Weight parameter
           #  W(i,j,k):Symmetric Interaction parameter between feature j and 
           # rating k of movie i. n_visible : |i|, n_hidden : |j|,
@@ -50,7 +60,7 @@ class CFRBM(object):
                 size=(n_visible,n_hidden,n_rating)),
                 dtype=theano.config.floatX)
           # theano shared variable
-              W = theano.shared(value=initial_W, name='W', borrow=True)
+          W = theano.shared(value=initial_W, name='W', borrow=True)
 
         if hbias is None:
                 # create shared variable for hidden units bias
@@ -87,8 +97,8 @@ class CFRBM(object):
           h_sample = numpy.zeros(n_hidden,dtype=theano.config.floatX)
 
        	for i in xrange(n_rating):
-       		W_term += T.dot((T.dot(self.W[:,:,i],h_sample)).T, /
-       			v_matrix_sample[:,i])
+       		W_term += T.dot((T.dot(self.W[:,:,i],h_sample)).T, \
+            v_matrix_sample[:,i])
        	
        	Z_term = numpy.zeros(n_visible) 
        	for i in xrange(n_visible):
@@ -98,7 +108,7 @@ class CFRBM(object):
        			Z_term[i] += T.exp(self.vbias[i,l] + loop_term)
        		Z_term +=  T.log(Z_term[i])
 
-       	visible_term = numpy.trace(T.dot(v_matrix_sample, /
+       	visible_term = numpy.trace(T.dot(v_matrix_sample, \
        		self.vbias.T))
 
        	hidden_term = T.dot(h_sample,self.hbias.T)
@@ -107,15 +117,15 @@ class CFRBM(object):
     
     def visible_model_dist(self,i,hid):
     	'''The new conditional probability will take softmax function instead of 
-    	sigmoid function. We use a conditional multinomial distribution (a “soft-
-		max”) for modeling each column of the observed “visible” binary 
-		rating matrix V'''
+    	sigmoid function. We use a conditional multinomial distribution (a soft-
+		  max) for modeling each column of the observed visible binary 
+	    rating matrix V'''
 
     	activation_i = self.vbias[i,:] + (T.dot(hid,self.W[i,:,:])).T
     	return [activation_i, T.nnet.softmax(activation_i)]
 
     def hidden_model_dist(self,j,vis):
-    	''' A conditional Bernoulli distribution for modeling “hidden” 
+    	''' A conditional Bernoulli distribution for modeling hidden
     	user features h '''
 
     	activation_j = self.hbias[j] + numpy.trace(T.dot(vis, self.W[:,j,:].T))
@@ -163,7 +173,7 @@ class CFRBM(object):
         pre_sigmoid_h1, h1_mean, h1_sample = self.sample_h_given_v(v0_sample)
         pre_sigmoid_v1, v1_mean, v1_sample = self.sample_v_given_h(h1_sample)
         return [pre_sigmoid_h1, h1_mean, h1_sample,
-                pre_sigmoid_v1, v1_mean, v1_sample
+                pre_sigmoid_v1, v1_mean, v1_sample]
 
     def get_cost_updates(self, lr=0.1, persistent=None, k=1):
         """This functions implements one step of CD-k or PCD-k
@@ -247,6 +257,194 @@ class CFRBM(object):
 
         return cross_entropy
 
-def test_rbm():
+def test_rbm(learning_rate=0.1,
+             training_epochs=15,
+             dataset='ml-100k/u.data',
+             batch_size=20,
+             n_chians=20,
+             n_samples=10,
+             output_folder='cfrbm_plots',
+             n_hidden=500):
+
+    """
+      Training the RBM and afterwards sample from it using Theano.
+      
+      This is shown using the "MovieLens Dataset"
+      
+      :param learning_rate: learning rate used for training the RBM
+
+      :param training_epochs: number of epochs used for training
+
+      :param dataset: path the the dataset
+
+      :param batch_size: size of a batch used to train the RBM
+
+      :param n_chains: number of parallel Gibbs chains to be used for sampling
+
+      :param n_samples: number of samples to plot for each chain
+
+    """
+
+    r_cols = ['user_id', 'movie_id', 'rating', 'unix_timestamp']
+    raw_ratings = pd.read_csv('ml-100k/u.data', sep='\t', names=r_cols) 
+    
+    ratings = raw_ratings[[0,1,2]]
+    
+    train_set_x = ratings.loc[1:50000][[0,1]]
+    train_set_y = ratings.loc[1:50000][[2]]
+    test = ratings.loc[1:50000][[0,1]]
+    test_set_y = ratings.loc[1:50000][[2]]
+
+    n_train_batches = train_set_x.shape[0]/ batch_size
+
+    # allocate symbolic variables for the data
+    index = T.lscalar()    # index to a [mini]batch
+    x = T.matrix('x')  # the data is presented as rasterized images
+
+    rng = numpy.random.RandomState(123)
+    theano_rng = RandomStreams(rng.randint(2 ** 30))
+
+    # initialize storage for the persistent chain (state = hidden
+    # layer of chain)
+    persistent_chain = theano.shared(numpy.zeros((batch_size, n_hidden),
+                                                 dtype=theano.config.floatX),
+                                     borrow=True)
+
+    # A Dict consisting as each user as Key and the movies rated by that user as the Val.
+    adict = {}
+    df = train_set_x[['user_id','movie_id']]
+
+    # yoyo = ratings[['user_id','movie_id']]
+    # print yoyo[(ratings.user_id==196)].shape[0] # number of movies rated by user_id = '196'. 
+    
+    for userid in list(df[[0]].values.flatten()):
+      if userid not in adict:
+        movies_rated = yoyo[(ratings.user_id == userid)][[1]]
+        adict[userid] = []
+        mylist = adict.get(userid)
+        mylist.append(list(movies_rated.values.flatten()))
+
+
+
+    # Now for each user in the dict a new RBM has to be created. The number of hidden units in each of the RBM
+    # will be the number of Values corresponding to that user's Key.
+
+    
+
+    # construct the RBM class
+    rbm = RBM(input=x, n_visible=,
+              n_hidden=n_hidden, n_rating=K, numpy_rng=rng, theano_rng=theano_rng)
+
+    # get the cost and the gradient corresponding to one step of CD-15
+    cost, updates = rbm.get_cost_updates(lr=learning_rate,
+                                         persistent=persistent_chain, k=15)
+   
+    #################################
+    #     Training the RBM          #
+    #################################
+    if not os.path.isdir(output_folder):
+        os.makedirs(output_folder)
+    os.chdir(output_folder)
+
+    # it is ok for a theano function to have no output
+    # the purpose of train_rbm is solely to update the RBM parameters
+    train_rbm = theano.function([index], cost,
+           updates=updates,
+           givens={x: train_set_x.loc[index * batch_size:
+                                  (index + 1) * batch_size]},
+           name='train_rbm')
+
+    plotting_time = 0.
+    start_time = time.clock()
+
+    # go through training epochs
+    for epoch in xrange(training_epochs):
+
+        # go through the training set
+        mean_cost = []
+        for batch_index in xrange(n_train_batches):
+            mean_cost += [train_rbm(batch_index)]
+
+        print 'Training epoch %d, cost is ' % epoch, numpy.mean(mean_cost)
+
+        # Plot filters after each training epoch
+        plotting_start = time.clock()
+        # Construct image from the weight matrix
+        image = PIL.Image.fromarray(tile_raster_images(
+                 X=rbm.W.get_value(borrow=True).T,
+                 img_shape=(28, 28), tile_shape=(10, 10),
+                 tile_spacing=(1, 1)))
+        image.save('filters_at_epoch_%i.png' % epoch)
+        plotting_stop = time.clock()
+        plotting_time += (plotting_stop - plotting_start)
+
+    end_time = time.clock()
+    pretraining_time = (end_time - start_time) - plotting_time
+
+    print ('Training took %f minutes' % (pretraining_time / 60.))
+
+    #################################
+    #     Sampling from the RBM     #
+    #################################
+    # find out the number of test samples
+    number_of_test_samples = test_set_x.shape[0
+
+    plot_every = 1000
+    # define one step of Gibbs sampling (mf = mean-field) define a
+    # function that does `plot_every` steps before returning the
+    # sample for plotting
+    [presig_hids, hid_mfs, hid_samples, presig_vis,
+     vis_mfs, vis_samples], updates =  \
+                        theano.scan(rbm.gibbs_vhv,
+                                outputs_info=[None,  None, None, None,
+                                              None, persistent_vis_chain],
+                                n_steps=plot_every)
+
+    # add to updates the shared variable that takes care of our persistent
+    # chain :.
+    updates.update({persistent_vis_chain: vis_samples[-1]})
+    # construct the function that implements our persistent chain.
+    # we generate the "mean field" activations for plotting and the actual
+    # samples for reinitializing the state of our persistent chain
+    sample_fn = theano.function([], [vis_mfs[-1], vis_samples[-1]],
+                                updates=updates,
+                                name='sample_fn')
+
+    # create a space to store the image for plotting ( we need to leave
+    # room for the tile_spacing as well)
+    image_data = numpy.zeros((29 * n_samples + 1, 29 * n_chains - 1),
+                             dtype='uint8')
+    for idx in xrange(n_samples):
+        # generate `plot_every` intermediate samples that we discard,
+        # because successive samples in the chain are too correlated
+        vis_mf, vis_sample = sample_fn()
+        print ' ... plotting sample ', idx
+        image_data[29 * idx:29 * idx + 28, :] = tile_raster_images(
+                X=vis_mf,
+                img_shape=(28, 28),
+                tile_shape=(1, n_chains),
+                tile_spacing=(1, 1))
+        # construct image
+
+    image = PIL.Image.fromarray(image_data)
+    image.save('samples.png')
+    os.chdir('../')
+
+if __name__ == '__main__':
+    test_rbm()
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
 
 
