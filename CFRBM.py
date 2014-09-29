@@ -20,7 +20,7 @@ import theano
 import theano.tensor as T
 import os
 
-import pandas
+import pandas as pd
 
 from theano.tensor.shared_randomstreams import RandomStreams
 
@@ -100,6 +100,7 @@ class CFRBM(object):
        		W_term += T.dot((T.dot(self.W[:,:,i],h_sample)).T, \
             v_matrix_sample[:,i])
        	
+        #TODO:elemwise operations
        	Z_term = numpy.zeros(n_visible) 
        	for i in xrange(n_visible):
        		for l in xrange(n_rating):
@@ -170,7 +171,7 @@ class CFRBM(object):
     def gibbs_vis_hid_vis(self, v0_sample):
         ''' This function implements one step of Gibbs sampling,
             starting from the visible state'''
-        pre_sigmoid_h1, h1_mean, h1_sample = self.sample_h_given_v(v0_sample)
+        pre_sigmoid_h1, h1_mean, h1_sample = selif.sample_h_given_v(v0_sample)
         pre_sigmoid_v1, v1_mean, v1_sample = self.sample_v_given_h(h1_sample)
         return [pre_sigmoid_h1, h1_mean, h1_sample,
                 pre_sigmoid_v1, v1_mean, v1_sample]
@@ -257,7 +258,7 @@ class CFRBM(object):
 
         return cross_entropy
 
-def test_rbm(learning_rate=0.1,
+def sinlge_rbm(learning_rate=0.1,
              training_epochs=15,
              dataset='ml-100k/u.data',
              batch_size=20,
@@ -285,17 +286,7 @@ def test_rbm(learning_rate=0.1,
 
     """
 
-    r_cols = ['user_id', 'movie_id', 'rating', 'unix_timestamp']
-    raw_ratings = pd.read_csv('ml-100k/u.data', sep='\t', names=r_cols) 
     
-    ratings = raw_ratings[[0,1,2]]
-    
-    train_set_x = ratings.loc[1:50000][[0,1]]
-    train_set_y = ratings.loc[1:50000][[2]]
-    test = ratings.loc[1:50000][[0,1]]
-    test_set_y = ratings.loc[1:50000][[2]]
-
-    n_train_batches = train_set_x.shape[0]/ batch_size
 
     # allocate symbolic variables for the data
     index = T.lscalar()    # index to a [mini]batch
@@ -328,6 +319,8 @@ def test_rbm(learning_rate=0.1,
 
     # Now for each user in the dict a new RBM has to be created. The number of hidden units in each of the RBM
     # will be the number of Values corresponding to that user's Key.
+    # The weights of each movie has to be shared between different RBMs.
+    # So in this way the same weights get updated for a particular movie, hence a collaborative effort. 
 
     
 
@@ -337,7 +330,7 @@ def test_rbm(learning_rate=0.1,
 
     # get the cost and the gradient corresponding to one step of CD-15
     cost, updates = rbm.get_cost_updates(lr=learning_rate,
-                                         persistent=persistent_chain, k=15)
+                                         persistent=persistent_chain, k=15)             
    
     #################################
     #     Training the RBM          #
@@ -431,7 +424,52 @@ def test_rbm(learning_rate=0.1,
     os.chdir('../')
 
 if __name__ == '__main__':
-    test_rbm()
+
+  #################################
+  #     Prepare the dataset     #
+  #################################  
+  r_cols = ['user_id', 'movie_id', 'rating', 'unix_timestamp']
+  raw_ratings = pd.read_csv('ml-100k/u.data', sep='\t', names=r_cols) 
+  
+  ratings = raw_ratings[[0,1,2]]
+  
+  train_set_x = ratings.loc[1:50000][[0,1]]
+  train_set_y = ratings.loc[1:50000][[2]]
+  test = ratings.loc[1:50000][[0,1]]
+  test_set_y = ratings.loc[1:50000][[2]]
+
+  n_train_batches = train_set_x.shape[0]/ batch_size
+
+  #################################
+  #     One RBM per user    #
+  #################################
+
+  single_rbm()
+
+  ##################################################
+  #      Pass on the learned weights to next RBM   #
+  ##################################################
+
+  ############################################################
+  #      Continue this for a certain batch size and epochs   #
+  ############################################################
+
+  ##################################################################################
+  #      RBM is just an unsupervised pretraining algo.                             #
+  #      This further needs to be bolstered by supervised fine-tuning              #
+  #      using traditional back-propagation to make the system prediction-ready.   #
+  ##################################################################################
+
+  ########################################################################################################
+  #      'Predict module' to predict a rating for movie query depending on the user's indicator matrix   #
+  ########################################################################################################
+
+
+
+
+
+
+
 
 
 
